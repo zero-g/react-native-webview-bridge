@@ -2,12 +2,12 @@
  * Copyright (c) 2015-present, Facebook, Inc.
  * All rights reserved.
  *
- * Copyright (c) 2016-present, Ali Najafizadeh
- * All rights reserved.
- *
  * This source code is licensed under the BSD-style license found in the
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
+ *
+ * Copyright (c) 2015-present, Ali Najafizadeh (github.com/alinz)
+ * All rights reserved
  *
  * @providesModule WebViewBridge
  * @flow
@@ -17,7 +17,6 @@
 var React = require('react-native');
 var invariant = require('invariant');
 var keyMirror = require('keymirror');
-var resolveAssetSource = require('react-native/Libraries/Image/resolveAssetSource');
 
 var {
   ActivityIndicatorIOS,
@@ -25,19 +24,15 @@ var {
   StyleSheet,
   Text,
   View,
-  WebView,
   requireNativeComponent,
   PropTypes,
-  UIManager,
   NativeModules: {
     WebViewBridgeManager
   }
 } = React;
 
 var BGWASH = 'rgba(255,255,255,0.8)';
-var RCT_WEBVIEWBRIDGE_REF = 'webviewbridge';
-
-var RCTWebViewBridgeManager = WebViewBridgeManager;
+var RCT_WEBVIEW_BRIDGE_REF = 'webviewbridge';
 
 var WebViewBridgeState = keyMirror({
   IDLE: null,
@@ -46,15 +41,15 @@ var WebViewBridgeState = keyMirror({
 });
 
 var NavigationType = {
-  click: RCTWebViewBridgeManager.NavigationType.LinkClicked,
-  formsubmit: RCTWebViewBridgeManager.NavigationType.FormSubmitted,
-  backforward: RCTWebViewBridgeManager.NavigationType.BackForward,
-  reload: RCTWebViewBridgeManager.NavigationType.Reload,
-  formresubmit: RCTWebViewBridgeManager.NavigationType.FormResubmitted,
-  other: RCTWebViewBridgeManager.NavigationType.Other,
+  click: WebViewBridgeManager.NavigationType.LinkClicked,
+  formsubmit: WebViewBridgeManager.NavigationType.FormSubmitted,
+  backforward: WebViewBridgeManager.NavigationType.BackForward,
+  reload: WebViewBridgeManager.NavigationType.Reload,
+  formresubmit: WebViewBridgeManager.NavigationType.FormResubmitted,
+  other: WebViewBridgeManager.NavigationType.Other,
 };
 
-var JSNavigationScheme = RCTWebViewBridgeManager.JSNavigationScheme;
+var JSNavigationScheme = WebViewBridgeManager.JSNavigationScheme;
 
 type ErrorEvent = {
   domain: any;
@@ -88,6 +83,9 @@ var defaultRenderError = (errorDomain, errorCode, errorDesc) => (
 
 /**
  * Renders a native WebView.
+ *
+ * Note that WebView is only supported on iOS for now,
+ * see https://facebook.github.io/react-native/docs/known-issues.html
  */
 var WebViewBridge = React.createClass({
   statics: {
@@ -96,14 +94,58 @@ var WebViewBridge = React.createClass({
   },
 
   propTypes: {
-    ...WebView.propTypes,
+    ...View.propTypes,
+    url: PropTypes.string,
+    html: PropTypes.string,
+    renderError: PropTypes.func, // view to show if there's an error
+    renderLoading: PropTypes.func, // loading indicator to show
+    bounces: PropTypes.bool,
+    scrollEnabled: PropTypes.bool,
+    automaticallyAdjustContentInsets: PropTypes.bool,
+    contentInset: EdgeInsetsPropType,
+    onNavigationStateChange: PropTypes.func,
+    startInLoadingState: PropTypes.bool, // force WebView to show loadingView on first load
+    style: View.propTypes.style,
+
+    /**
+     * Used for android only, JS is enabled by default for WebView on iOS
+     * @platform android
+     */
+    javaScriptEnabledAndroid: PropTypes.bool,
+
+    /**
+     * Sets the JS to be injected when the webpage loads.
+     */
+    injectedJavaScript: PropTypes.string,
+
+    /**
+     * Sets whether the webpage scales to fit the view and the user can change the scale.
+     * @platform ios
+     */
+    scalesPageToFit: PropTypes.bool,
+
+    /**
+     * Allows custom handling of any webview requests by a JS handler. Return true
+     * or false from this method to continue loading the request.
+     * @platform ios
+     */
+    onShouldStartLoadWithRequest: PropTypes.func,
+
+    /**
+     * Determines whether HTML5 videos play inline or use the native full-screen
+     * controller.
+     * default value `false`
+     * **NOTE** : "In order for video to play inline, not only does this
+     * property need to be set to true, but the video element in the HTML
+     * document must also include the webkit-playsinline attribute."
+     * @platform ios
+     */
+    allowsInlineMediaPlayback: PropTypes.bool,
 
     /**
      * Will be called once the message is being sent from webview
      */
     onBridgeMessage: PropTypes.func,
-
-    hideKeyboardAccessoryView: PropTypes.bool,
   },
 
   getInitialState: function() {
@@ -142,31 +184,21 @@ var WebViewBridge = React.createClass({
       );
     }
 
-    var webViewStyles = [styles.container, styles.webView, this.props.style];
+    var webViewBridgeStyles = [styles.container, styles.webViewBridge, this.props.style];
     if (this.state.viewState === WebViewBridgeState.LOADING ||
       this.state.viewState === WebViewBridgeState.ERROR) {
       // if we're in either LOADING or ERROR states, don't show the webView
-      webViewStyles.push(styles.hidden);
+      webViewBridgeStyles.push(styles.hidden);
     }
 
     var onShouldStartLoadWithRequest = this.props.onShouldStartLoadWithRequest && ((event: Event) => {
       var shouldStart = this.props.onShouldStartLoadWithRequest &&
         this.props.onShouldStartLoadWithRequest(event.nativeEvent);
-      RCTWebViewBridgeManager.startLoadWithResult(!!shouldStart, event.nativeEvent.lockIdentifier);
+      WebViewBridgeManager.startLoadWithResult(!!shouldStart, event.nativeEvent.lockIdentifier);
     });
 
-    var {javaScriptEnabled, domStorageEnabled} = this.props;
-    if (this.props.javaScriptEnabledAndroid) {
-      console.warn('javaScriptEnabledAndroid is deprecated. Use javaScriptEnabled instead');
-      javaScriptEnabled = this.props.javaScriptEnabledAndroid;
-    }
-    if (this.props.domStorageEnabledAndroid) {
-      console.warn('domStorageEnabledAndroid is deprecated. Use domStorageEnabled instead');
-      domStorageEnabled = this.props.domStorageEnabledAndroid;
-    }
-
     var onBridgeMessage = (event: Event) => {
-      const onBridgeMessageCallback = this.props.onBridgeMessage;
+      var onBridgeMessageCallback = this.props.onBridgeMessage;
       if (onBridgeMessageCallback) {
         const messages = event.nativeEvent.messages;
         messages.forEach((message) => {
@@ -175,57 +207,48 @@ var WebViewBridge = React.createClass({
       }
     };
 
-    let {source, ...props} = {...this.props};
-    delete props.onBridgeMessage;
-    delete props.onShouldStartLoadWithRequest;
-
-    var webView =
+    var webViewBridge =
       <RCTWebViewBridge
-        ref={RCT_WEBVIEWBRIDGE_REF}
-        key="webViewKey"
-        {...props}
-        source={resolveAssetSource(source)}
-        style={webViewStyles}
+        ref={RCT_WEBVIEW_BRIDGE_REF}
+        key="webViewBridgeKey"
+        style={webViewBridgeStyles}
+        url={this.props.url}
+        html={this.props.html}
+        injectedJavaScript={this.props.injectedJavaScript}
+        bounces={this.props.bounces}
+        scrollEnabled={this.props.scrollEnabled}
+        contentInset={this.props.contentInset}
+        automaticallyAdjustContentInsets={this.props.automaticallyAdjustContentInsets}
         onLoadingStart={this.onLoadingStart}
         onLoadingFinish={this.onLoadingFinish}
         onLoadingError={this.onLoadingError}
         onShouldStartLoadWithRequest={onShouldStartLoadWithRequest}
+        scalesPageToFit={this.props.scalesPageToFit}
+        allowsInlineMediaPlayback={this.props.allowsInlineMediaPlayback}
         onBridgeMessage={onBridgeMessage}
       />;
 
     return (
       <View style={styles.container}>
-        {webView}
+        {webViewBridge}
         {otherView}
       </View>
     );
   },
 
   goForward: function() {
-    UIManager.dispatchViewManagerCommand(
-      this.getWebViewBridgeHandle(),
-      UIManager.RCTWebViewBridge.Commands.goForward,
-      null
-    );
+    WebViewBridgeManager.goForward(this.getWebViewBridgeHandle());
   },
 
   goBack: function() {
-    UIManager.dispatchViewManagerCommand(
-      this.getWebViewBridgeHandle(),
-      UIManager.RCTWebViewBridge.Commands.goBack,
-      null
-    );
+    WebViewBridgeManager.goBack(this.getWebViewBridgeHandle());
   },
 
   reload: function() {
-    UIManager.dispatchViewManagerCommand(
-      this.getWebViewBridgeHandle(),
-      UIManager.RCTWebViewBridge.Commands.reload,
-      null
-    );
+    WebViewBridgeManager.reload(this.getWebViewBridgeHandle());
   },
 
-  sendToBridge: function (message: string) {
+  sendToBridge: function (message) {
     WebViewBridgeManager.sendToBridge(this.getWebViewBridgeHandle(), message);
   },
 
@@ -240,20 +263,15 @@ var WebViewBridge = React.createClass({
   },
 
   getWebViewBridgeHandle: function(): any {
-    return React.findNodeHandle(this.refs[RCT_WEBVIEWBRIDGE_REF]);
+    return React.findNodeHandle(this.refs[RCT_WEBVIEW_BRIDGE_REF]);
   },
 
   onLoadingStart: function(event: Event) {
-    var onLoadStart = this.props.onLoadStart;
-    onLoadStart && onLoadStart(event);
     this.updateNavigationState(event);
   },
 
   onLoadingError: function(event: Event) {
     event.persist(); // persist this event because we need to store it
-    var {onError, onLoadEnd} = this.props;
-    onError && onError(event);
-    onLoadEnd && onLoadEnd(event);
     console.warn('Encountered an error loading page', event.nativeEvent);
 
     this.setState({
@@ -263,9 +281,6 @@ var WebViewBridge = React.createClass({
   },
 
   onLoadingFinish: function(event: Event) {
-    var {onLoad, onLoadEnd} = this.props;
-    onLoad && onLoad(event);
-    onLoadEnd && onLoadEnd(event);
     this.setState({
       viewState: WebViewBridgeState.IDLE,
     });
@@ -311,7 +326,7 @@ var styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  webView: {
+  webViewBridge: {
     backgroundColor: '#ffffff',
   }
 });
